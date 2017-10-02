@@ -1,0 +1,2 @@
+# landslide_susceptibility_mapping_in_mila_basin
+Landslide susceptibility mapping in Mila basin
