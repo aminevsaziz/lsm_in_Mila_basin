@@ -1,0 +1,382 @@
+---
+title: "Landslide susceptibility mapping in Mila basin"
+author: "Merghadi Abdelaziz"
+date: "01/09/2017"
+output: html_document
+---
+
+```{r Setup, message=FALSE, warning=FALSE, include=FALSE}
+## Setup Knitr options :
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(echo = TRUE,cache = TRUE,fig.width = 7,fig.height = 7,dpi = 1200,cache.rebuild = T)
+
+## Assure That English is Sys. Language
+Sys.setenv(LANG = "en_US.UTF-8")
+Sys.setlocale(category = "LC_ALL",locale = "en_US.UTF-8")
+options(papersize = "special")
+
+## Loading Required Libraries 
+library(setRNG,quietly = T)
+library(ggplot2,quietly = T)
+library(dplyr,quietly = T)
+library(mlr,quietly = T)
+library(mlrMBO,quietly = T)
+#library(parallelMap,quietly = T)
+
+## Init. Project Folder Path 
+PROJHOME = normalizePath(rprojroot::find_rstudio_root_file())
+
+## Load required Script/Function files
+source(file.path(PROJHOME, "R", "Checking_And_Ploting_NA.R"))
+source(file.path(PROJHOME, "R", "Correlation_Correlogram_Func.R"))
+source(file.path(PROJHOME, "R", "Variance_Inflation_Factor_Func.R"))
+source(file.path(PROJHOME, "R", "Hyperparmeter_Ploting_Func.R"))
+source(file.path(PROJHOME, "R", "Roc_Ploting_Func.R"))
+source(file.path(PROJHOME, "R", "wilcox_test.R"))
+
+
+## Init. Necessary Folders
+## Checking the existence of certain folders if not create them
+ifelse(!dir.exists(file.path(PROJHOME,"Data")),dir.create(file.path(PROJHOME,"Data")),F)
+
+ifelse(!dir.exists(file.path(PROJHOME,"Outputs")),dir.create(file.path(PROJHOME,"Outputs")),F)
+
+ifelse(!dir.exists(file.path(PROJHOME,"Outputs","Tables")),dir.create(file.path(PROJHOME,"Outputs","Tables")),F)
+
+ifelse(!dir.exists(file.path(PROJHOME,"Outputs","Figures")),dir.create(file.path(PROJHOME,"Outputs","Figures")), F)
+
+## Configure Mlr Package
+#mlr::configureMlr(show.info = T, show.learner.output = T,on.learner.warning = "quiet")
+mlr::configureMlr(show.info = T, show.learner.output = T)
+
+  
+```
+
+The control object for the optimization is based on the Return of the best point ever visited according to true value of target function using Lower Confidence Bound (LCB) as an infill criterion that guides the model based on the search process both with kriging/RandomForest as surrogate models (depending on the problem we are solving), and 30 iteration of evaluations.
+A part from 30 evaultions mentioned above there exist *40 initial evaluations* marked as an initial design search space.
+
+```{r Init. Data & Resampling Discriptions, echo=TRUE}
+## Number of CPUs to use in Optimization
+cpus = 2L
+
+## seed for resampling stratigies
+setRNG::setRNG("L'Ecuyer",101)
+
+## Load Input Data
+Samples <- read.csv(file.path(PROJHOME, "Data", "Input_Dataset1.csv"),header = T)
+
+## Load data as task with "Yes" as Positive Class to target ##
+Benchmark_Task <- makeClassifTask(id= "Benchmark",data =Samples,target = "Landslides", positive = "Yes")
+
+## Setup the desired resampling Stratigy With 5Rep 10 CV ##
+Rdesc_Inner = makeResampleInstance(desc = makeResampleDesc(method = "RepCV",stratify = T,predict = "both",folds=10L,reps=5L),task = Benchmark_Task)
+
+## Init. The Inner Objective function For The Experiment
+# NOTE: set seed to Ecuyer since we parallelise the experiment
+lrn.fun <- function(cl,id,par.vals,task,resampling,objectives,dummy,preproc,aggr,seed) {
+  
+  ## Argument Flags
+  #assertChoice(cl, choices = mlr::listLearners()$class)
+  #cl.flag = is.null(cl) || !(cl %in% mlr::listLearners()$class)
+  checkmate::assertFlag(dummy)
+  checkmate::assertFlag(preproc)
+  checkmate::assertFlag(aggr)
+  
+  ## Init. The Stopping critireon 
+  # if (cl.flag)
+  #   stopf("Unsupported Learner")
+  if (is.null(seed) || length(objectives) > 24 ) 
+    stopf("Set seed or greater than 24 objective is not supported yet")
+  
+  ## setup Function Structure
+  
+  if (dummy) {
+    setRNG::setRNG("L'Ecuyer",seed)
+    lrn = mlr::makeDummyFeaturesWrapper(mlr::makeLearner(cl,predict.type = "prob",id = id, par.vals = par.vals))
+  }
+  else {
+    setRNG::setRNG("L'Ecuyer",seed)
+    lrn = mlr::makeLearner(cl,predict.type = "prob",id = id, par.vals = par.vals)
+  } 
+  
+  if (preproc) {
+    lrn = mlr::makePreprocWrapperCaret(lrn,ppc.center=T,ppc.scale=T,ppc.range=F)
+  }
+  else {
+    lrn = lrn
+  }  
+  
+  if (aggr){ 
+    res = mlr::resample(lrn, task,resampling, measures = objectives,models = T, show.info = T)$aggr
+  }
+  else {
+    res = mlr::resample(lrn, task,resampling, measures = objectives,models = T, show.info = T)
+  }
+  
+  # return Outcomes
+  return(res)
+  
+}
+
+Measures <- list(auc,bac,kappa,tpr,fnr)
+
+## Init. Baysian Optimization Search Control
+
+# construct the Model Based Optimization control object 
+ctrl = makeMBOControl()
+
+# We will allow for 30 iteration after the initial design of the objective function:
+ctrl = setMBOControlTermination(ctrl,iters = 30L)
+
+```
+
+
+```{r Checking & Ploting NA Values, echo=TRUE,dpi=1200,fig.align="center"}
+
+  ## Missing Data Plot 
+  Missing_Values_Plot <- Na_Plot(Input.Data = Samples)
+  ggsave(file.path(PROJHOME, "Outputs","Figures","Missing_Values_Plot.eps"),plot = Missing_Values_Plot,width = 5,height = 5,dpi = 1200 ,device = "eps",units = "in")
+  
+  ## Correlogram for The Input Data
+  #grDevices::postscript(file = "Plots/Correlogram_Plot.eps",width =5 ,height = 5,horizontal = FALSE,onefile = FALSE, paper = "special")
+  Correlogram=Cor_Ggplot(Samples)
+  ggsave(file.path(PROJHOME, "Outputs","Figures","Correlogram.eps"),plot = Correlogram,width = 5,height = 5,dpi = 1200 ,device = "eps",units = "in")
+  
+ ## Vif for The Input Data
+  
+  Vif <- Vif_Plot(Input.Data = Samples,form = Landslides ~ .,lim = c(0,5.2),"Variance Inflation Factor","")
+  ggsave(file.path(PROJHOME, "Outputs","Figures","Vif_Plot.eps"),plot = Vif,width = 5,height = 5,dpi = 1200 ,device = "eps",units = "in")    
+
+```
+
+#the Gradient Boosting Machine (GBM) using : Generalized Boosted Regression Models (gbm) Package.
+ 
+```{r Tune & Benchmark GBM, echo=TRUE, message=FALSE, warning=FALSE}
+## Set Seed
+setRNG::setRNG("L'Ecuyer",101)
+
+## Init Hyperparamter set to be tuned
+gbm.ps <- makeParamSet(makeDiscreteParam("distribution",values = "bernoulli"),
+                       makeNumericParam("shrinkage",0,1),
+                       makeIntegerParam("n.trees",32L,1024L),
+                       makeIntegerParam("interaction.depth",1L,8L))
+
+## Init. Objective Functions
+
+gbm = smoof::makeSingleObjectiveFunction(name = "gbm.tuning",
+                                         fn = function(x) {lrn.fun(cl = "classif.gbm",id = "GBM",par.vals = x,task = Benchmark_Task,resampling = Rdesc_Inner,objectives = list(auc),dummy=F,preproc=F,aggr=T,seed = 101)},
+                                         par.set = gbm.ps,has.simple.signature = FALSE,noisy = F,minimize = F)
+
+## init design space for the optimization 
+gbm.des = ParamHelpers::generateDesign(30L, getParamSet(gbm), fun = lhs::optimumLHS)
+
+# Tune gbm
+tune.gbm = mlrMBO::mbo(gbm, gbm.des, control = ctrl, show.info = TRUE)
+
+## Extract The Best all Possible HyperCombination for The optimization
+gbm.set <- tune.gbm$x
+write.csv(dplyr::bind_rows(gbm.set),file.path(PROJHOME, "Outputs","Tables","gbm.set.csv"), row.names=F)
+
+## Extract All The Optimization Evaluations
+gbm.opt.path = as.data.frame(tune.gbm$opt.path,stringsAsFactors=F)
+
+# Benchmark gbm Using all HyperCombination supplied by tune.gbm
+setRNG::setRNG("L'Ecuyer",101)
+final.gbm.model <- lrn.fun(cl = "classif.gbm",id = "GBM",par.vals = gbm.set,task = Benchmark_Task,resampling = Rdesc_Inner,objectives = Measures,dummy=F,preproc=F,aggr=F,seed = 101)
+```
+
+#Init the Random Forests (RF) using: A Fast Implementation of Random Forests (Ranger) Package.
+
+```{r Tune & Benchmark RF, message=FALSE, warning=FALSE, include=FALSE}
+
+  ## Set Seed
+setRNG::setRNG("L'Ecuyer",101)
+
+## Init Hyperparamter set to be tuned
+rf.ps <- makeParamSet(makeIntegerParam("num.trees",32L,1024L),
+  makeIntegerParam("mtry",2L,8L))
+
+## Init. Objective Functions
+rf = smoof::makeSingleObjectiveFunction(name = "rf.tuning",
+                                        fn = function(x) {lrn.fun(cl = "classif.ranger",id = "RF",par.vals = x,task = Benchmark_Task,resampling = Rdesc_Inner,objectives = list(auc),dummy=F,preproc=F,aggr=T,seed = 101)},
+                                        par.set = rf.ps,has.simple.signature = FALSE,noisy = F,minimize = F)
+
+## init design spwwace for the optimization 
+rf.des = ParamHelpers::generateDesign(15L, getParamSet(rf), fun = lhs::optimumLHS)
+
+# Tune rf
+tune.rf = mlrMBO::mbo(rf, rf.des, control = ctrl, show.info = TRUE)
+
+## Extract The Best all Possible HyperCombination for The optimization
+rf.set <- tune.rf$x
+write.csv(dplyr::bind_rows(rf.set),file.path(PROJHOME, "Outputs","Tables","rf.set.csv"), row.names=F)
+
+## Extract All The Optimization Evaluations
+rf.opt.path = as.data.frame(tune.rf$opt.path,stringsAsFactors=F)
+
+# Benchmark rf Using all HyperCombination supplied by tune.rf
+setRNG::setRNG("L'Ecuyer",101)
+final.rf.model <- lrn.fun(cl = "classif.ranger",id = "RF",par.vals = rf.set,task = Benchmark_Task,resampling = Rdesc_Inner,objectives = Measures,dummy=F,preproc=F,aggr=F,seed = 101)
+  
+
+```
+
+#Init the Multilayer Perceptron Neural Network (MLP) using: Feed-Forward Neural Networks and Multinomial Log-Linear Models (nnet)
+
+```{r Tune & Benchmark nnet, message=FALSE, warning=FALSE, include=FALSE}
+## Set Seed
+setRNG::setRNG("L'Ecuyer",101)
+
+## Init Hyperparamter set to be tuned
+
+nnet.ps <- makeParamSet(makeDiscreteParam("maxit",values = 1.5e+2L),
+  makeDiscreteParam("rang",values = 0.5),
+  makeDiscreteParam("MaxNWts",values = 1e+5L),
+  makeDiscreteParam("Hess",values = c("TRUE"=TRUE)),
+  makeIntegerParam("size",4L,33L),
+  makeNumericParam("decay",0,1))
+
+## Init. Objective Functions
+nnet = smoof::makeSingleObjectiveFunction(name = "nnet.tuning",
+                                          fn = function(x) {lrn.fun("classif.nnet","NNET",par.vals =x,Benchmark_Task,Rdesc_Inner,objectives = list(auc),dummy=T,preproc=F,aggr=T,seed = 101)},
+                                          par.set = nnet.ps,has.simple.signature = FALSE,noisy = F,minimize = F)
+
+## init design space for the optimization 
+nnet.des = ParamHelpers::generateDesign(8L, getParamSet(nnet), fun = lhs::optimumLHS)
+
+# Tune nnet
+tune.nnet = mlrMBO::mbo(nnet, nnet.des, control = ctrl, show.info = TRUE)
+
+## Extract The Best all Possible HyperCombination for The optimization
+nnet.set <- tune.nnet$x
+write.csv(dplyr::bind_rows(nnet.set),file.path(PROJHOME, "Outputs","Tables","nnet.set.csv"), row.names=F)
+
+## Extract All The Optimization Evaluations
+nnet.opt.path = as.data.frame(tune.nnet$opt.path,stringsAsFactors=F)
+
+# Benchmark nnet Using all HyperCombination supplied by tune.nnet
+setRNG::setRNG("L'Ecuyer",101)
+final.nnet.model <- lrn.fun(cl = "classif.nnet",id = "NNET",par.vals = nnet.set,task = Benchmark_Task,resampling = Rdesc_Inner,objectives = Measures,dummy=T,preproc=F,aggr=F,seed = 101)
+```
+
+#Init the Support Vector Machine (SVM) using : Misc Functions of the Department of Statistics,Probability Theory Group(Formerly:E1071) Package.
+
+```{r Tune & Benchmark SVM, message=FALSE, warning=FALSE, include=FALSE}
+
+ ## Set Seed
+setRNG::setRNG("L'Ecuyer",101)
+
+## Init Hyperparamter set to be tuned rbfdot
+svm.ps <-  makeParamSet(makeNumericParam("cost",-15,15,trafo = function(x)2^x),
+  makeNumericParam("gamma",-15,15,trafo = function(x)2^x))
+
+## Init. Objective Functions
+svm = smoof::makeSingleObjectiveFunction(name = "svm.tuning",
+                                         fn =function(x){lrn.fun("classif.svm","SVM",x,Benchmark_Task,Rdesc_Inner,list(auc),F,F,T,101)},
+                                         par.set = svm.ps,has.simple.signature = FALSE,noisy = F,minimize = F)
+
+## init design space for the optimization 
+svm.des = ParamHelpers::generateDesign(8L, getParamSet(svm), fun = lhs::optimumLHS)
+
+# Tune svm
+tune.svm = mlrMBO::mbo(svm, svm.des, control = ctrl, show.info = TRUE)
+
+## Extract The Best all Possible HyperCombination for The optimization
+svm.set <- tune.svm$x
+trafo_set <- c("cost","gamma")
+for (i in trafo_set){svm.set[[i]] = 2^svm.set[[i]]}
+write.csv(dplyr::bind_rows(svm.set),file.path(PROJHOME, "Outputs","Tables","svm.set.csv"), row.names=F)
+
+## Extract All The Optimization Evaluations
+svm.opt.path = as.data.frame(tune.svm$opt.path,stringsAsFactors=F)
+
+# Benchmark svm Using all HyperCombination supplied by tune.svm
+setRNG::setRNG("L'Ecuyer",101)
+final.svm.model <- lrn.fun(cl = "classif.svm",id = "SVM",par.vals = svm.set,task = Benchmark_Task,resampling = Rdesc_Inner,objectives = Measures,dummy=F,preproc=F,aggr=F,seed = 101)
+
+```
+
+
+#Init the Generalized Linear Model (LR) using : R Stats Package.
+```{r Benchmark lr, message=FALSE, warning=FALSE, include=FALSE}
+  ## Set Seed
+  setRNG::setRNG("L'Ecuyer",101)
+  # Benchmark lr
+  final.lr.model = lrn.fun(cl = "classif.binomial",id = "LR",par.vals = list(link = "logit" ),task = Benchmark_Task,resampling = Rdesc_Outer,objectives = Measures,dummy=F,preproc=F,aggr=F,seed = 101)
+```
+
+#Perform the Overall Performance
+
+```{r Overall.Perf, message=FALSE, warning=FALSE, include=FALSE}
+
+Learners.List = list(final.gbm.model,final.lr.model,final.nnet.model,final.rf.model,final.svm.model)
+names(Learners.List) <- c("final_gbm_model","final_lr_model","final_nnet_model","final_rf_model","final_svm_model")
+
+## Generate Auc Plots
+## For Stacked ROC-Plot
+Roc.Auc.Plot=Roc.Plot.Stacked(Learners.List)
+
+## Export AUC-ROC Plots
+## For Stacked ROC-Plot
+ggsave(file.path(PROJHOME, "Outputs","Figures","Roc_AUC.eps"),plot = Roc.Auc.Plot,width = 5,height = 5,dpi = 1200 ,device = "eps",units = "in")
+
+## Generate Overall Performace Table
+Overall.Perf.table=dplyr::bind_rows(lapply(Learners.List,function(x){
+  
+  raw.df = data.frame(t(as.data.frame(x$aggr)))
+  
+  # dplyr::select(raw.df,contains(".test.")) %>%
+  #   `colnames<-`(gsub("\\b\\..*","",colnames(.),fixed = F)) %>%
+  #   dplyr::mutate(.,Stage="Test") %>%
+  #   dplyr::mutate(.,Learner=x$learner.id) -> tst
+  # 
+  # dplyr::select(raw.df,contains(".train.")) %>%
+  #   `colnames<-`(gsub("\\b\\..*","",colnames(.),fixed = F)) %>%
+  #   dplyr::mutate(.,Stage="Train") %>%
+  #   dplyr::mutate(.,Learner=x$learner.id) -> trn
+  # 
+  # raw.final=rbind(tst,trn)
+  return(raw.df)
+  
+}))
+Overall.Perf.table[,1:3]=apply(dplyr::select_if(Overall.Perf.table, is.numeric),2,function(x)round(x,5))
+
+## Export Overall Performace Table
+write.csv(Overall.Perf.table,file.path(PROJHOME, "Outputs","Tables","Overall.Perf.table.csv"), row.names=F)
+
+
+a=wilcox_test(final.gbm.model$measures.test$auc, final.rf.model$measures.test$auc,paired = T)
+b=wilcox_test(final.gbm.model$measures.test$auc, final.lr.model$measures.test$auc,paired = T)
+c=wilcox_test(final.gbm.model$measures.test$auc, final.nnet.model$measures.test$auc,paired = T)
+d=wilcox_test(final.gbm.model$measures.test$auc, final.svm.model$measures.test$auc,paired = T)
+
+e=wilcox_test(final.rf.model$measures.test$auc, final.lr.model$measures.test$auc,paired = T)
+f=wilcox_test(final.rf.model$measures.test$auc, final.nnet.model$measures.test$auc,paired = T)
+g=wilcox_test(final.rf.model$measures.test$auc, final.svm.model$measures.test$auc,paired = T)
+
+h=wilcox_test(final.svm.model$measures.test$auc, final.lr.model$measures.test$auc,paired = T)
+i=wilcox_test(final.svm.model$measures.test$auc, final.nnet.model$measures.test$auc,paired = T)
+
+j=wilcox_test(final.nnet.model$measures.test$auc, final.lr.model$measures.test$auc,paired = T)
+
+test <- list(a=a,b=b,c=c,d=d,e=e,f=f,g=g,h=h,i=i,j=j)
+test1 <- lapply(test,function(x){
+  statistic = x$statistic
+  z.value = x$z_val
+  p.value = x$p.value
+  raw.df = data.frame(statistic,z.value,p.value)
+  return(raw.df)
+  
+  })
+test1 <- dplyr::bind_rows(test1)
+
+levels <- c("GBM vs. RF","GBM vs. LR","GBM vs. NNET","GBM vs. SVM",
+  "RF vs. LR","RF vs. NNET","RF vs. SVM",
+  "SVM vs.LR","SVM vs. NNET",
+  "NNET vs. LR")
+test1 <- dplyr::bind_cols(level=levels,statistic=test1$statistic,z.value=test1$z.value,p.value=test1$p.value)
+
+write.csv(test1,file.path(PROJHOME, "Outputs","Tables","Overall.Sig.table.csv"), row.names=F)
+ 
+```
+
