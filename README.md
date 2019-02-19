@@ -6,7 +6,14 @@
 
 [lsm_in_Mila_basin](https://github.com/aminevsaziz/lsm_in_Mila_basin) is a repository that contain source files and scripts for "Landslide Susceptibility Mapping In Mila Basin" Project.
 
+## How to Cite and Citing Publications
 
+To cite this code in publications, please cite:
+
+- The [paper](https://doi.org/10.3390/ijgi7070268) attached to this source code available [here](https://doi.org/10.3390/ijgi7070268) .
+- The repository itself using the following DOI [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1000431.svg)](https://doi.org/10.5281/zenodo.1000431)
+
+Some parts of the source code were created as part of other publications. If you use these parts, please cite the relevant work appropriately.
 
 ## Data
 
@@ -26,6 +33,6 @@ This repository is actively maintained. This means that while an effort is made 
 
 
 
-## License ##
+## License
 
 The files in this repository are licensed under the GPL-3.0.
